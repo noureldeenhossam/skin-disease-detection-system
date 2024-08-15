@@ -1,0 +1,197 @@
+!pip install kaggle
+
+!mkdir -p ~/.kaggle
+!cp kaggle.json ~/.kaggle/
+!chmod 600 ~/.kaggle/kaggle.json
+
+!kaggle datasets download -d noureldeenhossam/33k-skin-disease-data-set
+
+!unzip -q 33k-skin-disease-data-set.zip
+
+import tensorflow as tf
+import seaborn as sns
+from tensorflow.keras import layers
+from tensorflow.keras import mixed_precision
+mixed_precision.set_global_policy("float32")
+
+from tensorflow.keras.preprocessing import image_dataset_from_directory
+train_dir="/content/train"
+test_dir="/content/test"
+val_dir="/content/valid"
+train_data=image_dataset_from_directory(train_dir,batch_size=32,image_size=(224,224),label_mode='categorical',shuffle=True,seed=42)
+test_data=image_dataset_from_directory(test_dir,batch_size=32,image_size=(224,224),label_mode='categorical',shuffle=False,seed=42)
+val_data=image_dataset_from_directory(val_dir,batch_size=32,image_size=(224,224),label_mode='categorical',shuffle=False,seed=42)
+
+class_names=train_data.class_names
+class_count=len(class_names)
+print(len(class_names))
+print(class_names)
+train_data = train_data.prefetch(buffer_size = tf.data.AUTOTUNE)
+test_data = test_data.prefetch(buffer_size = tf.data.AUTOTUNE)
+val_data = val_data.prefetch(buffer_size = tf.data.AUTOTUNE)
+
+from tensorflow.keras.layers import Dense,Activation,Dropout,Conv2D,MaxPooling2D,BatchNormalization,Flatten
+from tensorflow.keras import regularizers
+from tensorflow.keras.models import Model, load_model, Sequential
+model_name='EfficientNetB1'
+base_model=tf.keras.applications.EfficientNetB1(include_top=False, weights="imagenet",input_shape=(224,224,3), pooling='max')
+x=base_model.output
+#x=layers.GlobalAvgPool2D(name = "pooling_layer")(x)
+x=tf.keras.layers.BatchNormalization(axis=-1, momentum=0.99, epsilon=0.001 )(x)
+x=Dense(256, kernel_regularizer = regularizers.l2(l = 0.016),activity_regularizer=regularizers.l1(0.006),
+                bias_regularizer=regularizers.l1(0.006) ,activation='relu')(x)
+x=Dense(128, kernel_regularizer = regularizers.l2(l = 0.016),activity_regularizer=regularizers.l1(0.006),
+                bias_regularizer=regularizers.l1(0.006) ,activation='relu')(x)
+x=Dropout(rate=.45, seed=42)(x)
+output=Dense(class_count, activation='softmax')(x)
+model=Model(inputs=base_model.input, outputs=output)
+
+
+
+
+def lr_scheduler(epoch):
+    if epoch < 5:
+        return 0.001
+    elif epoch < 10:
+        return 0.0001
+    elif epoch < 13:
+        return 0.00001
+    elif epoch < 16:
+        return 0.000001
+    else:
+        return 0.000001
+
+# Learning rate scheduler
+from tensorflow.keras.callbacks import LearningRateScheduler  # Import LearningRateScheduler
+
+lr_scheduler = LearningRateScheduler(lr_scheduler)
+print(lr_scheduler)
+# Compile the model
+model.compile(optimizer=tf.keras.optimizers.Adamax(learning_rate=0.0001),
+              loss='categorical_crossentropy',
+              metrics=['accuracy'])
+
+
+
+# Train the model using the prefetched training data, validation data, and learning rate scheduler
+history=model.fit(train_data,epochs = 16,
+                     validation_data = val_data, callbacks=[lr_scheduler])
+
+import os
+subject='Skin-disease-b1'
+save_path= r'./'
+acc=87
+save_id=str (model_name +  '-' + subject +'-'+ str(acc)[:str(acc).rfind('.')+3] + '.h5')
+model_save_loc=os.path.join(save_path, save_id)
+model.save(model_save_loc)
+
+model.evaluate(test_data)
+
+
+pred_probs = model.predict(test_data)
+pred_classes = pred_probs.argmax(axis =1)
+y_labels = []
+for image,label in test_data.unbatch():
+    y_labels.append(label.numpy().argmax())
+from sklearn.metrics import classification_report
+print("Classification report\n",classification_report(y_labels,pred_classes))
+
+from sklearn.metrics import confusion_matrix
+import itertools
+import matplotlib.pyplot as plt
+import matplotlib.image as mping
+import numpy as np
+def make_confusion_matrix(y_true, y_pred, classes=None, figsize=(10, 10), text_size=15, norm=False, savefig=False):
+    cm = confusion_matrix(y_true, y_pred)
+    cm_norm = cm.astype("float") / cm.sum(axis=1)[:, np.newaxis] # normalize it
+    n_classes = cm.shape[0] # find the number of classes we're dealing with
+
+  # Plot the figure and make it pretty
+    fig, ax = plt.subplots(figsize=figsize)
+    cax = ax.matshow(cm, cmap=plt.cm.Blues) # colors will represent how 'correct' a class is, darker == better
+    fig.colorbar(cax)
+
+  # Are there a list of classes?
+    if classes:
+        labels = classes
+    else:
+        labels = np.arange(cm.shape[0])
+    ax.set(title="Confusion Matrix",
+         xlabel="Predicted label",
+         ylabel="True label",
+         xticks=np.arange(n_classes), # create enough axis slots for each class
+         yticks=np.arange(n_classes),
+         xticklabels=labels, # axes will labeled with class names (if they exist) or ints
+         yticklabels=labels)
+
+  # Make x-axis labels appear on bottom
+    ax.xaxis.set_label_position("bottom")
+    ax.xaxis.tick_bottom()
+
+  ### Added: Rotate xticks for readability & increase font size (required due to such a large confusion matrix)
+    plt.xticks(rotation=70, fontsize=text_size)
+    plt.yticks(fontsize=text_size)
+    threshold = (cm.max() + cm.min()) / 2.
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+        if norm:
+            plt.text(j, i, f"{cm[i, j]} ({cm_norm[i, j]*100:.1f}%)",
+            horizontalalignment="center",
+            color="white" if cm[i, j] > threshold else "black",
+            size=text_size)
+        else:
+            plt.text(j, i, f"{cm[i, j]}",
+            horizontalalignment="center",
+            color="white" if cm[i, j] > threshold else "black",
+            size=text_size)
+
+# Save the figure to the current working directory
+    if savefig:
+        fig.savefig("confusion_matrix.png")
+
+make_confusion_matrix(y_labels,pred_classes,classes = class_names,figsize = (10,10))
+
+
+acc=history.history["accuracy"]
+loss=history.history["loss"]
+val_acc=history.history["val_accuracy"]
+val_loss=history.history["val_loss"]
+plt.figure(figsize=(25, 25))
+plt.subplot(5, 1, 1)
+plt.plot(acc, label='Training Accuracy')
+plt.plot(val_acc, label='Validation Accuracy')
+
+plt.plot(loss, label='Training Loss')
+plt.plot(val_loss, label='Validation Loss')
+
+import cv2 as cv2
+test_img = cv2.imread("/content/test/Melanocytic Nevi (NV)/ISIC_0000065_downsampled_jpg.rf.b7683aad16443983a585cd584ec6fec0.jpg")
+test_img = cv2.resize(test_img, (224, 224))
+test_input = test_img.reshape((1, 224, 224, 3))
+predictions = model.predict(test_input)
+print(predictions)
+
+import matplotlib.pyplot as plt
+
+# Get training and testing accuracy and loss histories
+training_accuracy = history.history['accuracy']
+validation_accuracy = history.history['val_accuracy']
+training_loss = history.history['loss']
+validation_loss = history.history['val_loss']
+
+# Plot training and testing accuracy curves
+plt.plot(training_accuracy)
+plt.plot(validation_accuracy)
+plt.title('Training vs Validation Accuracy')
+plt.ylabel('Accuracy')
+plt.xlabel('Epoch')
+plt.legend(['Training', 'Validation'], loc='lower right')
+plt.show()
+
+# Plot training and testing loss curves
+plt.plot(training_loss)
+plt.plot(validation_loss)
+plt.title('Training vs Validation Loss')
+plt.ylabel('Loss')
+plt.xlabel('Epoch')
+plt.legend(['Training', 'Validation'], loc='upper right')
+
